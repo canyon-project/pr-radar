@@ -12,6 +12,11 @@ const dto = z.object({
   htmlUrl: z.string(),
   mergedByLogin: z.string().nullable(),
   baseRef: z.string(),
+  mergeCommitSha: z.string().nullable(),
+  botBranchName: z.string().nullable(),
+  botBranchHtmlUrl: z.string().nullable(),
+  botPushedAt: z.string().nullable(),
+  botLastError: z.string().nullable(),
   createdAt: z.string(),
   taskSummary: z.object({
     repositoryUrl: z.string(),
@@ -28,6 +33,11 @@ function toDto(row: {
   htmlUrl: string;
   mergedByLogin: string | null;
   baseRef: string;
+  mergeCommitSha: string | null;
+  botBranchName: string | null;
+  botBranchHtmlUrl: string | null;
+  botPushedAt: Date | null;
+  botLastError: string | null;
   createdAt: Date;
   task: { repositoryUrl: string; branch: string };
 }) {
@@ -40,6 +50,11 @@ function toDto(row: {
     htmlUrl: row.htmlUrl,
     mergedByLogin: row.mergedByLogin,
     baseRef: row.baseRef,
+    mergeCommitSha: row.mergeCommitSha,
+    botBranchName: row.botBranchName,
+    botBranchHtmlUrl: row.botBranchHtmlUrl,
+    botPushedAt: row.botPushedAt ? row.botPushedAt.toISOString() : null,
+    botLastError: row.botLastError,
     createdAt: row.createdAt.toISOString(),
     taskSummary: { repositoryUrl: row.task.repositoryUrl, branch: row.task.branch },
   };

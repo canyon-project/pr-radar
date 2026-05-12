@@ -40,6 +40,11 @@ export type PrRadarMergedPr = {
   htmlUrl: string;
   mergedByLogin: string | null;
   baseRef: string;
+  mergeCommitSha: string | null;
+  botBranchName: string | null;
+  botBranchHtmlUrl: string | null;
+  botPushedAt: string | null;
+  botLastError: string | null;
   createdAt: string;
   taskSummary: {
     repositoryUrl: string;

@@ -3,13 +3,19 @@ import type { Prisma, PrRadarWatchTask } from "@prisma/client";
 
 import { getInfra, InfraKey } from "@/api/lib/infra.ts";
 import { prisma } from "@/api/lib/prisma.ts";
+import { runPendingMergedPrBotsForTask } from "@/api/lib/prRadarGithubForkBot.ts";
 
-const MAX_PAGES = 30;
+/** 单次轮询最多请求 GitHub pulls 分页次数，避免对大仓库分页扫过久 */
+const MAX_PAGES = 10;
+
+/** 单次轮询结束前，最多补跑多少条未完成 fork 镜像的 backlog */
+const BOT_BACKLOG_PER_POLL = 8;
 
 type GitHubPull = {
   number: number;
   title: string;
   merged_at: string | null;
+  merge_commit_sha: string | null;
   html_url: string;
   base: { ref: string };
   merged_by?: { login?: string | null } | null;
@@ -88,11 +94,13 @@ export async function pollWatchTask(task: PrRadarWatchTask): Promise<{ newCount:
         htmlUrl: pr.html_url,
         mergedByLogin: pr.merged_by?.login ?? null,
         baseRef: pr.base.ref,
+        mergeCommitSha: pr.merge_commit_sha ?? null,
       });
       existing.add(pr.number);
     }
 
     if (batch.length > 0) {
+      // 唯一约束 + skipDuplicates；existing Set 跳过已入库编号
       const res = await prisma.prRadarMergedPr.createMany({
         data: batch,
         skipDuplicates: true,
@@ -101,6 +109,16 @@ export async function pollWatchTask(task: PrRadarWatchTask): Promise<{ newCount:
     }
 
     page += 1;
+  }
+
+  try {
+    await runPendingMergedPrBotsForTask({
+      token,
+      task,
+      limit: BOT_BACKLOG_PER_POLL,
+    });
+  } catch (e) {
+    console.error(`[pr-radar-bot] backlog for task ${task.id}`, e);
   }
 
   await prisma.prRadarWatchTask.update({

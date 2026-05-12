@@ -13,6 +13,7 @@ import {
   Switch,
   Table,
   Tag,
+  Tooltip,
   message,
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
@@ -284,6 +285,38 @@ const PrRadarPage = () => {
       render: (iso: string) => new Date(iso).toLocaleString(),
     },
     {
+      title: "Bot 分支",
+      key: "botBranch",
+      width: 200,
+      ellipsis: true,
+      render: (_, r) =>
+        r.botBranchHtmlUrl ? (
+          <a href={r.botBranchHtmlUrl} target="_blank" rel="noreferrer">
+            {r.botBranchName ?? "打开分支"}
+          </a>
+        ) : (
+          <span style={{ color: "#999" }}>—</span>
+        ),
+    },
+    {
+      title: "Bot 状态",
+      key: "botStatus",
+      width: 160,
+      render: (_, r) => {
+        if (r.botPushedAt) {
+          return <Tag color="green">已推送</Tag>;
+        }
+        if (r.botLastError) {
+          return (
+            <Tooltip title={r.botLastError}>
+              <Tag color="red">失败（悬停查看）</Tag>
+            </Tooltip>
+          );
+        }
+        return <Tag>待处理</Tag>;
+      },
+    },
+    {
       title: "合并者",
       dataIndex: "mergedByLogin",
       width: 120,
@@ -333,7 +366,10 @@ const PrRadarPage = () => {
                 新建监听
               </Button>
               <span style={{ color: "#666", fontSize: 13 }}>
-                仅会将「合并到指定 base 分支」且 merged_at 非空的 PR 入库。
+                合并 PR 后会以 Token 持有者身份确保存在指向上游的 fork（仓库名约 <code>org-repo-随机串</code>
+                ，已 fork 过则跳过创建并复用 DB 记录）、对监听分支 <code>merge-upstream</code>，再在 fork
+                上创建 <code>{`canyon-bot/pr-<编号>`}</code> 指向 merge commit，并提交根目录{' '}
+                <code>test.md</code>。
               </span>
             </Space>
           </div>
