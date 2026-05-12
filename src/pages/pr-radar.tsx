@@ -366,10 +366,10 @@ const PrRadarPage = () => {
                 新建监听
               </Button>
               <span style={{ color: "#666", fontSize: 13 }}>
-                合并 PR 后会以 Token 持有者身份确保存在指向上游的 fork（仓库名约 <code>org-repo-随机串</code>
-                ，已 fork 过则跳过创建并复用 DB 记录）、对监听分支 <code>merge-upstream</code>，再在 fork
-                上创建 <code>{`canyon-bot/pr-<编号>`}</code> 指向 merge commit，并提交根目录{' '}
-                <code>test.md</code>。
+                每条监听任务在库里<strong>最多只保留一条</strong>合并 PR；pulls 仍为 <code>
+                  per_page=1
+                </code>
+                ；Bot backlog 每轮也<strong>最多处理一条</strong>。
               </span>
             </Space>
           </div>
