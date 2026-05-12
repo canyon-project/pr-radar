@@ -14,4 +14,16 @@ model Note {
   content   String
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+
+  @@map("pr_radar_note")
+}
+
+model Infra {
+  id        String   @id
+  name      String
+  value     String   @db.Text
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("pr_radar_infra_config")
 }
