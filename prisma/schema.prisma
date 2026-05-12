@@ -18,6 +18,7 @@ model Note {
   @@map("pr_radar_note")
 }
 
+/// 运行期配置（键为 id）。其中 id = "GITHUB_PRIVATE_TOKEN" 存 GitHub PAT，供 PR 雷达请求 API。
 model Infra {
   id        String   @id
   name      String
@@ -26,4 +27,38 @@ model Infra {
   updatedAt DateTime @updatedAt
 
   @@map("pr_radar_infra_config")
+}
+
+/// PR 雷达：按仓库 + 目标分支 + 频率轮询，仅合并（merged_at 非空）的 PR 落库
+model PrRadarWatchTask {
+  id              String       @id @default(uuid())
+  repositoryUrl   String
+  owner           String
+  repo            String
+  branch          String
+  intervalMinutes Int
+  enabled         Boolean      @default(true)
+  lastPolledAt    DateTime?
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
+  mergedPrs       PrRadarMergedPr[]
+
+  @@map("pr_radar_watch_task")
+}
+
+/// 已入库的合并 PR（按任务维度去重 githubPrNumber）
+model PrRadarMergedPr {
+  id             String           @id @default(uuid())
+  taskId         String
+  githubPrNumber Int
+  title          String
+  mergedAt       DateTime
+  htmlUrl        String
+  mergedByLogin  String?
+  baseRef        String
+  createdAt      DateTime         @default(now())
+  task           PrRadarWatchTask @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  @@unique([taskId, githubPrNumber])
+  @@map("pr_radar_merged_pr")
 }

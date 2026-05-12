@@ -6,8 +6,16 @@ import { serveStatic } from "@hono/node-server/serve-static";
 import { fileURLToPath } from "node:url";
 
 import noteApi from "@/api/routes/note.ts";
+import infraGithubApi from "@/api/routes/infra-github.ts";
+import prRadarMergedApi from "@/api/routes/pr-radar-merged.ts";
+import prRadarWatchApi from "@/api/routes/pr-radar-watch.ts";
+import { startPrRadarScheduler } from "@/api/lib/prRadarScheduler.ts";
 
 import { historyApiFallback } from "hono-history-api-fallback";
+import { loadInfra } from "@/api/lib/infra.ts";
+
+await loadInfra();
+startPrRadarScheduler();
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 
@@ -16,13 +24,16 @@ const app = new Hono();
 const api = new OpenAPIHono();
 
 api.route("/notes", noteApi);
+api.route("/infra", infraGithubApi);
+api.route("/pr-radar/watch-tasks", prRadarWatchApi);
+api.route("/pr-radar/merged-prs", prRadarMergedApi);
 
 api.doc("/doc", {
   openapi: "3.0.0",
   info: {
     version: "1.0.0",
     title: "API",
-    description: "全栈 Web 应用 API，包含文章、仓库、源码、覆盖率等模块。",
+    description: "全栈 Web 应用 API（含 GitHub PR 雷达与笔记等）。",
   },
   servers: [{ url: "/api", description: "API base path" }],
 });

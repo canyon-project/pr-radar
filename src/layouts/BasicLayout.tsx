@@ -36,6 +36,10 @@ const BasicLayout = ({ children }: BasicLayoutProps) => {
               key: "/projects",
               label: <Link to="/projects">项目 · 笔记</Link>,
             },
+            {
+              key: "/pr-radar",
+              label: <Link to="/pr-radar">PR 雷达</Link>,
+            },
           ]}
         />
       </Sider>
