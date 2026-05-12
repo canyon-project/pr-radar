@@ -3,6 +3,7 @@ import {
   Alert,
   Button,
   Card,
+  Drawer,
   Form,
   Input,
   InputNumber,
@@ -14,6 +15,7 @@ import {
   Table,
   Tag,
   Tooltip,
+  Typography,
   message,
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
@@ -22,12 +24,14 @@ import {
   createPrRadarWatchTask,
   deletePrRadarWatchTask,
   getGithubTokenStatus,
+  getPrRadarJob,
   listPrRadarMergedPrs,
   listPrRadarWatchTasks,
   pollPrRadarWatchTaskNow,
   prRadarApiErrorMessage,
   putGithubToken,
   updatePrRadarWatchTask,
+  type PrRadarJobDto,
   type PrRadarMergedPr,
   type PrRadarWatchTask,
 } from "@/services/prRadar.ts";
@@ -51,6 +55,10 @@ const PrRadarPage = () => {
 
   const [tokenModalOpen, setTokenModalOpen] = useState(false);
   const [tokenForm] = Form.useForm<{ token: string }>();
+
+  const [pollDrawerOpen, setPollDrawerOpen] = useState(false);
+  const [trackedJobId, setTrackedJobId] = useState<string | null>(null);
+  const [trackedJob, setTrackedJob] = useState<PrRadarJobDto | null>(null);
 
   const fetchTokenStatus = useCallback(async () => {
     try {
@@ -97,6 +105,32 @@ const PrRadarPage = () => {
   useEffect(() => {
     void fetchMerged();
   }, [fetchMerged]);
+
+  useEffect(() => {
+    const jobId = trackedJobId;
+    if (!jobId || !pollDrawerOpen) return undefined;
+    const stableJobId = jobId;
+
+    let terminalFetched = false;
+
+    async function pollOnce() {
+      try {
+        const j = await getPrRadarJob(stableJobId);
+        setTrackedJob(j);
+        const done = j.status === "SUCCEEDED" || j.status === "FAILED";
+        if (done && !terminalFetched) {
+          terminalFetched = true;
+          await Promise.all([fetchTasks(), fetchMerged()]);
+        }
+      } catch {
+        /* skip */
+      }
+    }
+
+    void pollOnce();
+    const id = window.setInterval(() => void pollOnce(), 1_600);
+    return () => window.clearInterval(id);
+  }, [trackedJobId, pollDrawerOpen, fetchTasks, fetchMerged]);
 
   const taskOptions = useMemo(
     () =>
@@ -176,10 +210,14 @@ const PrRadarPage = () => {
   const pollNow = async (id: string) => {
     try {
       const res = await pollPrRadarWatchTaskNow(id);
-      message.success(`拉取完成，本次新增入库 ${res.newCount} 条`);
-      await Promise.all([fetchTasks(), fetchMerged()]);
+      setTrackedJob(null);
+      setTrackedJobId(res.jobId);
+      setPollDrawerOpen(true);
+      message.info(
+        res.reused ? "队列中仍有未完成作业，以下为同一异步任务日志" : "已排队异步抓取，正在轮询日志",
+      );
     } catch (e) {
-      message.error(prRadarApiErrorMessage(e, "拉取失败"));
+      message.error(prRadarApiErrorMessage(e, "排队失败"));
     }
   };
 
@@ -240,7 +278,7 @@ const PrRadarPage = () => {
             编辑
           </Button>
           <Button type="link" onClick={() => void pollNow(record.id)}>
-            立即拉取
+            立即拉取（异步）
           </Button>
           <Popconfirm title="删除此监听任务及其已入库 PR 记录？" onConfirm={() => void removeTask(record.id)}>
             <Button type="link" danger>
@@ -370,6 +408,7 @@ const PrRadarPage = () => {
                   per_page=1
                 </code>
                 ；Bot backlog 每轮也<strong>最多处理一条</strong>。
+                <strong>定时调度与「立即拉取」均异步入队</strong>，侧栏可轮询作业日志。
               </span>
             </Space>
           </div>
@@ -457,6 +496,72 @@ const PrRadarPage = () => {
           </Form.Item>
         </Form>
       </Modal>
+
+      <Drawer
+        title={trackedJob ? `抓取异步作业 · ${trackedJob.status}` : "抓取异步作业"}
+        open={pollDrawerOpen}
+        onClose={() => {
+          setPollDrawerOpen(false);
+          setTrackedJobId(null);
+        }}
+        width={640}
+        destroyOnHidden
+      >
+        {trackedJobId ? (
+          <Space direction="vertical" style={{ width: "100%" }} size={12}>
+            <Space wrap align="center">
+              <Tag>jobId</Tag>
+              <code style={{ fontSize: 12 }}>{trackedJobId}</code>
+              {trackedJob ? (
+                <>
+                  <Tag
+                    color={
+                      trackedJob.status === "SUCCEEDED"
+                        ? "green"
+                        : trackedJob.status === "FAILED"
+                          ? "red"
+                          : undefined
+                    }
+                  >
+                    {trackedJob.status}
+                  </Tag>
+                  {trackedJob.newCount !== null && trackedJob.newCount !== undefined ? (
+                    <Tag>入库 newCount={trackedJob.newCount}</Tag>
+                  ) : null}
+                </>
+              ) : (
+                <Tag color="processing">连接中…</Tag>
+              )}
+            </Space>
+            {trackedJob?.error ? (
+              <Alert type="error" message="作业失败" description={trackedJob.error} />
+            ) : null}
+            <pre
+              style={{
+                margin: 0,
+                padding: 12,
+                borderRadius: 8,
+                background: "#f5f5f5",
+                whiteSpace: "pre-wrap",
+                wordBreak: "break-word",
+                maxHeight: "70vh",
+                overflow: "auto",
+                fontSize: 12,
+                lineHeight: 1.5,
+              }}
+            >
+              {trackedJob?.logText ?? "等待 worker 写入日志…"}
+            </pre>
+            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+              约每 1.6 秒轮询接口 <code style={{ fontSize: 11 }}>GET /api/pr-radar/jobs/:id</code>
+              读取 <code>logText</code>
+              ；抓取与 Fork/Bot 在服务端 worker 中顺序执行。
+            </Typography.Text>
+          </Space>
+        ) : (
+          <div />
+        )}
+      </Drawer>
     </BasicLayout>
   );
 };

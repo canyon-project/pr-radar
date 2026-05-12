@@ -1,5 +1,5 @@
 import { prisma } from "@/api/lib/prisma.ts";
-import { pollWatchTask } from "@/api/lib/prRadarPoll.ts";
+import { tryEnqueuePollJob } from "@/api/lib/prRadarAsyncWorker.ts";
 
 let started = false;
 
@@ -10,7 +10,7 @@ function isDue(lastPolledAt: Date | null, intervalMinutes: number, nowMs: number
 }
 
 /**
- * 每分钟检查一次已到期的监听任务并拉取 GitHub（仅 merged 的 PR 会写入库表）
+ * 每分钟检查一次已到期的监听任务，向其投递异步抓取作业（由 Job worker FIFO 执行）
  */
 export function startPrRadarScheduler(): void {
   if (started) return;
@@ -26,9 +26,12 @@ export function startPrRadarScheduler(): void {
     for (const task of tasks) {
       if (!isDue(task.lastPolledAt, task.intervalMinutes, now)) continue;
       try {
-        await pollWatchTask(task);
+        const enq = await tryEnqueuePollJob(task.id);
+        if (enq.createdNew) {
+          console.info(`[pr-radar] enqueued poll job ${enq.jobId} for task ${task.id}`);
+        }
       } catch (e) {
-        console.error(`[pr-radar] poll failed for task ${task.id} (${task.owner}/${task.repo} ${task.branch})`, e);
+        console.error(`[pr-radar] enqueue failed for task ${task.id}`, e);
       }
     }
   }

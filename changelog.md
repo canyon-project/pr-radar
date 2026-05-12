@@ -25,3 +25,5 @@
   - 状态字段：`mergeCommitSha`、`botBranchName`、`botBranchHtmlUrl`、`botPushedAt`、`botLastError`；轮询结束前补跑未完 backlog；**与「总量为 1」一致后，每任务每轮 backlog 上限为 1**。
 
 - **跟进（轻量化 LIST · 总量为 1）**：每次监听 **`GET .../pulls` 仅 1 次**、`per_page=1`；**数据库侧每个 `watchTask` 至多保留 1 行 `PrRadarMergedPr`**——若 LIST 排头兵已从旧 merged PR 换成另一条 merged，会 **`deleteMany` + `create`** 整块替换；若为同一 PR 则不动数据，只做 **去重多于一行**（防历史异常）。排头兵若短时不是 merged，则 **保留上一轮**已存那条 merged。
+
+- **跟进（异步 Job + 日志轮询）**：新增 **`PrRadarJobRun`**（状态、`logText`、`newCount`、`error`）。`POST .../watch-tasks/:id/poll` 返回 **202** + **`jobId`**，流水线由进程内 **FIFO worker** 异步执行 **`pollWatchTaskWithLog`** 并逐步 **`appendJobLog`**。提供 **`GET /api/pr-radar/jobs/:id`** 与 **`GET /api/pr-radar/jobs?taskId=`** 供前端轮询日志；定时调度改为 **`tryEnqueuePollJob`**。

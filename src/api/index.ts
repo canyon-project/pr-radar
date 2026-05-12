@@ -7,14 +7,17 @@ import { fileURLToPath } from "node:url";
 
 import noteApi from "@/api/routes/note.ts";
 import infraGithubApi from "@/api/routes/infra-github.ts";
+import prRadarJobApi from "@/api/routes/pr-radar-job.ts";
 import prRadarMergedApi from "@/api/routes/pr-radar-merged.ts";
 import prRadarWatchApi from "@/api/routes/pr-radar-watch.ts";
+import { startPrRadarJobWorker } from "@/api/lib/prRadarAsyncWorker.ts";
 import { startPrRadarScheduler } from "@/api/lib/prRadarScheduler.ts";
 
 import { historyApiFallback } from "hono-history-api-fallback";
 import { loadInfra } from "@/api/lib/infra.ts";
 
 await loadInfra();
+startPrRadarJobWorker();
 startPrRadarScheduler();
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
@@ -27,6 +30,7 @@ api.route("/notes", noteApi);
 api.route("/infra", infraGithubApi);
 api.route("/pr-radar/watch-tasks", prRadarWatchApi);
 api.route("/pr-radar/merged-prs", prRadarMergedApi);
+api.route("/pr-radar/jobs", prRadarJobApi);
 
 api.doc("/doc", {
   openapi: "3.0.0",

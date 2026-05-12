@@ -56,8 +56,33 @@ model PrRadarWatchTask {
   createdAt       DateTime     @default(now())
   updatedAt       DateTime     @updatedAt
   mergedPrs       PrRadarMergedPr[]
+  jobRuns         PrRadarJobRun[]
 
   @@map("pr_radar_watch_task")
+}
+
+enum PrRadarJobStatus {
+  PENDING
+  RUNNING
+  SUCCEEDED
+  FAILED
+}
+
+/// 单次「抓取 PR → Fork/Bot」异步作业日志，供前端轮询
+model PrRadarJobRun {
+  id         String           @id @default(uuid())
+  taskId     String
+  status     PrRadarJobStatus @default(PENDING)
+  logText    String           @default("") @db.Text
+  newCount   Int?
+  error      String?          @db.Text
+  startedAt  DateTime?
+  finishedAt DateTime?
+  createdAt  DateTime         @default(now())
+  task       PrRadarWatchTask @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  @@index([taskId, createdAt(sort: Desc)])
+  @@map("pr_radar_job_run")
 }
 
 /// 已入库的合并 PR（按任务维度去重 githubPrNumber）

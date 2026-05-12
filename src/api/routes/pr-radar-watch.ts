@@ -2,7 +2,7 @@ import { createRoute, z } from "@hono/zod-openapi";
 import { OpenAPIHono } from "@hono/zod-openapi";
 
 import { parseGithubRepo } from "@/api/lib/githubRepo.ts";
-import { pollWatchTask } from "@/api/lib/prRadarPoll.ts";
+import { tryEnqueuePollJob } from "@/api/lib/prRadarAsyncWorker.ts";
 import { prisma } from "@/api/lib/prisma.ts";
 
 const taskDto = z.object({
@@ -45,8 +45,10 @@ const patchBody = z
     { message: "至少需要修改一个字段" },
   );
 
-const pollResultDto = z.object({
-  newCount: z.number().int(),
+const pollEnqueueDto = z.object({
+  jobId: z.string().uuid(),
+  /** true 表示该任务已在跑 PENDING/RUNNING，未新建队列项 */
+  reused: z.boolean(),
 });
 
 function toDto(row: {
@@ -158,16 +160,15 @@ const deleteRouteDef = createRoute({
 const pollRouteDef = createRoute({
   method: "post",
   path: "/{id}/poll",
-  summary: "立即为该任务执行一次 GitHub 拉取（仍会过滤仅合并 PR）",
+  summary: "排队执行一次抓取 + Fork/Bot（异步）；用返回的 jobId 轮询 /pr-radar/jobs/{id} 读日志",
   tags: ["PR Radar · Watch"],
   request: { params: paramsId },
   responses: {
-    200: {
-      description: "已完成一次拉取",
-      content: { "application/json": { schema: pollResultDto } },
+    202: {
+      description: "已入队",
+      content: { "application/json": { schema: pollEnqueueDto } },
     },
     404: { description: "不存在" },
-    400: { description: "调用失败（如 Token 缺失或 GitHub 错误）" },
   },
 });
 
@@ -260,13 +261,8 @@ watchApi.openapi(pollRouteDef, async (c) => {
   if (!row) {
     return errJson(c, "未找到监听任务", 404);
   }
-  try {
-    const { newCount } = await pollWatchTask(row);
-    return c.json({ newCount });
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    return errJson(c, msg, 400);
-  }
+  const { jobId, createdNew } = await tryEnqueuePollJob(row.id);
+  return c.json({ jobId, reused: !createdNew }, 202);
 });
 
 export default watchApi;

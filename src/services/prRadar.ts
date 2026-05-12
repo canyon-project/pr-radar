@@ -52,6 +52,23 @@ export type PrRadarMergedPr = {
   };
 };
 
+export type PrRadarJobDto = {
+  id: string;
+  taskId: string;
+  status: string;
+  logText: string;
+  newCount: number | null;
+  error: string | null;
+  startedAt: string | null;
+  finishedAt: string | null;
+  createdAt: string;
+};
+
+export type PollEnqueueResult = {
+  jobId: string;
+  reused: boolean;
+};
+
 const api = axios.create({
   baseURL: "/api",
   headers: { "Content-Type": "application/json" },
@@ -88,9 +105,34 @@ export async function deletePrRadarWatchTask(id: string): Promise<void> {
   await api.delete(`/pr-radar/watch-tasks/${id}`);
 }
 
-export async function pollPrRadarWatchTaskNow(id: string): Promise<{ newCount: number }> {
-  const { data } = await api.post<{ newCount: number }>(`/pr-radar/watch-tasks/${id}/poll`);
+export async function enqueuePrRadarWatchTaskPoll(taskId: string): Promise<PollEnqueueResult> {
+  const response = await api.post<PollEnqueueResult>(
+    `/pr-radar/watch-tasks/${taskId}/poll`,
+    {},
+    {
+      validateStatus: (s) => s === 202,
+    },
+  );
+  return response.data;
+}
+
+export async function getPrRadarJob(jobId: string): Promise<PrRadarJobDto> {
+  const { data } = await api.get<PrRadarJobDto>(`/pr-radar/jobs/${jobId}`);
   return data;
+}
+
+export async function listPrRadarJobsForTask(
+  taskId: string,
+  limit = 10,
+): Promise<PrRadarJobDto[]> {
+  const { data } = await api.get<PrRadarJobDto[]>("/pr-radar/jobs", {
+    params: { taskId, limit },
+  });
+  return data;
+}
+
+export async function pollPrRadarWatchTaskNow(taskId: string): Promise<PollEnqueueResult> {
+  return enqueuePrRadarWatchTaskPoll(taskId);
 }
 
 export async function listPrRadarMergedPrs(taskId?: string): Promise<PrRadarMergedPr[]> {

@@ -4,8 +4,19 @@ import crypto from "node:crypto";
 import type { PrRadarWatchTask } from "@prisma/client";
 
 import { prisma } from "@/api/lib/prisma.ts";
+import type { PrRadarPollLogFn } from "@/api/lib/prRadarPollLog.ts";
 
 const GH_API_BASE = "https://api.github.com";
+
+/** 大型仓库 fork 时 GitHub 可能长时间才返回 HTTP 响应；axios 默认无超时易表现为「卡住」*/
+const GH_FORK_CREATE_TIMEOUT_MS = 300_000;
+
+/** fork 创建后对象同步可能超过数分钟（官方文档亦提示需等待）*/
+const GH_FORK_READY_MAX_MS = 600_000;
+
+async function logLine(cb: PrRadarPollLogFn | undefined, msg: string) {
+  await Promise.resolve(cb?.(msg));
+}
 
 export function ghHeaders(token: string) {
   return {
@@ -90,42 +101,82 @@ function upstreamMatchesParent(parentFullName: string | undefined, upstreamOwner
   return parentFullName.toLowerCase() === needle;
 }
 
+type ForkCreateApiPayload = {
+  name?: string;
+  fork?: boolean;
+  parent?: { full_name?: string };
+};
+
+function actualForkRepoSlugFromCreateResponse(requestedName: string, data: unknown): string {
+  const p = data && typeof data === "object" ? (data as ForkCreateApiPayload) : null;
+  const n = typeof p?.name === "string" && p.name.trim().length > 0 ? p.name.trim() : null;
+  return n ?? requestedName;
+}
+
 async function githubCreateFork(
   token: string,
   upstreamOwner: string,
   upstreamRepo: string,
   forkRepoName: string,
-): Promise<void> {
-  await axiosThrowGitHub(
-    `创建 fork「${upstreamOwner}/${upstreamRepo}」→「${forkRepoName}」失败`,
-    axios.post(
-      `${GH_API_BASE}/repos/${upstreamOwner}/${upstreamRepo}/forks`,
-      { name: forkRepoName, default_branch_only: false },
-      { headers: ghHeaders(token), validateStatus: () => true },
-    ),
+): Promise<string> {
+  const res = await axios.post(
+    `${GH_API_BASE}/repos/${upstreamOwner}/${upstreamRepo}/forks`,
+    { name: forkRepoName, default_branch_only: true },
+    {
+      headers: ghHeaders(token),
+      validateStatus: () => true,
+      timeout: GH_FORK_CREATE_TIMEOUT_MS,
+    },
   );
+  const bodyStr =
+    typeof res.data === "string" ? res.data : JSON.stringify(res.data ?? null, null, 2);
+  const maxLen = 16_384;
+  const truncated = bodyStr.length > maxLen ? `${bodyStr.slice(0, maxLen)}…(truncated ${bodyStr.length} chars)` : bodyStr;
+  console.log(`[pr-radar] githubCreateFork HTTP ${res.status} ${upstreamOwner}/${upstreamRepo} 请求名=${forkRepoName}\n${truncated}`);
+  if (res.status < 200 || res.status >= 300) {
+    throw new Error(`创建 fork「${upstreamOwner}/${upstreamRepo}」→「${forkRepoName}」失败 ${parseGithubAxiosMessage(res.status, res.data)}`);
+  }
+  const actualSlug = actualForkRepoSlugFromCreateResponse(forkRepoName, res.data);
+  if (actualSlug !== forkRepoName) {
+    console.log(
+      `[pr-radar] githubCreateFork GitHub 实际仓库名「${actualSlug}」与请求名「${forkRepoName}」不同（常见：已存在上游 fork 时返回 202 + 已有仓库）`,
+    );
+  }
+  return actualSlug;
 }
 
 async function awaitForkAccessible(
   token: string,
   forkOwner: string,
   forkRepoName: string,
+  log?: PrRadarPollLogFn,
 ): Promise<void> {
-  const maxMs = 90_000;
+  const maxMs = GH_FORK_READY_MAX_MS;
   const pollMs = 4_000;
   const deadline = Date.now() + maxMs;
+  const started = Date.now();
+  let lastProgressLog = started;
+  await logLine(log, `Fork：创建 API 已返回，正在等待远端仓库就绪（大型仓库可能需数分钟）…`);
   while (Date.now() < deadline) {
     if (await githubRepoAccessible(token, forkOwner, forkRepoName)) return;
+    const now = Date.now();
+    if (now - lastProgressLog >= 30_000) {
+      const waitedSec = Math.round((now - started) / 1000);
+      await logLine(log, `Fork：仍等待仓库就绪（已约 ${waitedSec}s）…`);
+      lastProgressLog = now;
+    }
     await new Promise((r) => setTimeout(r, pollMs));
   }
-  throw new Error(`Fork 仓库就绪超时「${forkOwner}/${forkRepoName}」`);
+  throw new Error(`Fork 仓库就绪超时「${forkOwner}/${forkRepoName}」（已等待约 ${Math.round(maxMs / 1000)}s）`);
 }
 
 export async function ensureUpstreamForkMapped(
   token: string,
   upstreamOwner: string,
   upstreamRepo: string,
+  log?: PrRadarPollLogFn,
 ): Promise<{ forkOwner: string; forkRepo: string }> {
+  await logLine(log, `Fork：校验 / 映射 ${upstreamOwner}/${upstreamRepo}`);
   const login = await fetchAuthenticatedLogin(token);
 
   const row = await prisma.prRadarUpstreamFork.findUnique({
@@ -145,7 +196,9 @@ export async function ensureUpstreamForkMapped(
         where: { id: row.id },
       });
     } else {
-      return { forkOwner: login, forkRepo: row.forkRepoName };
+      const r = { forkOwner: login, forkRepo: row.forkRepoName };
+      await logLine(log, `Fork：复用 DB 记录 ${r.forkOwner}/${r.forkRepo}`);
+      return r;
     }
   }
 
@@ -178,7 +231,9 @@ export async function ensureUpstreamForkMapped(
             randomSuffix: suffix,
           },
         });
-        return { forkOwner: login, forkRepo: actualName };
+        const r = { forkOwner: login, forkRepo: actualName };
+        await logLine(log, `Fork：认领已存在 remote ${r.forkOwner}/${r.forkRepo}`);
+        return r;
       }
 
       /** 名称冲突但被他人占用或非该上游 fork → 换新名重试 */
@@ -186,8 +241,15 @@ export async function ensureUpstreamForkMapped(
     }
 
     try {
-      await githubCreateFork(token, upstreamOwner, upstreamRepo, forkRepoName);
-      await awaitForkAccessible(token, login, forkRepoName);
+      await logLine(log, `Fork：尝试创建远端仓库名 ${forkRepoName} …`);
+      const actualForkRepo = await githubCreateFork(token, upstreamOwner, upstreamRepo, forkRepoName);
+      if (actualForkRepo !== forkRepoName) {
+        await logLine(
+          log,
+          `Fork：API 实际仓库名「${actualForkRepo}」（与请求「${forkRepoName}」不一致，常以已有 fork / 202 为准）`,
+        );
+      }
+      await awaitForkAccessible(token, login, actualForkRepo, log);
 
       await prisma.prRadarUpstreamFork.upsert({
         where: {
@@ -201,16 +263,18 @@ export async function ensureUpstreamForkMapped(
           upstreamOwner,
           upstreamRepo,
           githubLogin: login,
-          forkRepoName,
+          forkRepoName: actualForkRepo,
           randomSuffix: suffix,
         },
         update: {
-          forkRepoName,
+          forkRepoName: actualForkRepo,
           randomSuffix: suffix,
         },
       });
 
-      return { forkOwner: login, forkRepo: forkRepoName };
+      const r = { forkOwner: login, forkRepo: actualForkRepo };
+      await logLine(log, `Fork：创建完成 ${r.forkOwner}/${r.forkRepo}`);
+      return r;
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       if (
@@ -389,8 +453,9 @@ export async function processMergedPrForkMirror(args: {
   mergedRowId: string;
   prNumber: number;
   storedMergeSha: string | null;
+  log?: PrRadarPollLogFn;
 }): Promise<void> {
-  const { token, task, fork, mergedRowId, prNumber, storedMergeSha } = args;
+  const { token, task, fork, mergedRowId, prNumber, storedMergeSha, log } = args;
 
   let mergeSha = storedMergeSha;
 
@@ -401,6 +466,8 @@ export async function processMergedPrForkMirror(args: {
     }
     await persistMergeShaIfNeeded(mergedRowId, storedMergeSha, mergeSha);
   }
+
+  await logLine(log, `Bot：PR #${prNumber} merge_sha=${mergeSha.slice(0, 7)} …`);
 
   const tryMergeUpstreamQuiet = async () => {
     try {
@@ -413,6 +480,7 @@ export async function processMergedPrForkMirror(args: {
 
   let ok = await commitAccessible(token, fork.forkOwner, fork.forkRepo, mergeSha);
   if (!ok) {
+    await logLine(log, `Bot：merge_sha 对 fork 尚不可见，重试 merge-upstream …`);
     await tryMergeUpstreamQuiet();
     await new Promise((r) => setTimeout(r, 2_500));
     ok = await commitAccessible(token, fork.forkOwner, fork.forkRepo, mergeSha);
@@ -425,8 +493,10 @@ export async function processMergedPrForkMirror(args: {
   }
 
   const branchShort = botBranchNameForPr(prNumber);
+  await logLine(log, `Bot：建/移分支 refs/heads/${branchShort}`);
   await githubCreateBranchOrPointToSha(token, fork.forkOwner, fork.forkRepo, branchShort, mergeSha);
 
+  await logLine(log, `Bot：PUT Contents test.md@${branchShort}`);
   await githubPutTestMd({
     token,
     forkOwner: fork.forkOwner,
@@ -447,6 +517,7 @@ export async function processMergedPrForkMirror(args: {
       botLastError: null,
     },
   });
+  await logLine(log, `Bot：PR #${prNumber} 完成 ${branchUrl}`);
 }
 
 /** 对已入库条目跑 bot：确保 fork→sync→建分支→写 test.md（失败写 botLastError，后续轮询会重试） */
@@ -455,15 +526,19 @@ export async function runPendingMergedPrBotsForTask(props: {
   task: PrRadarWatchTask;
   /** 单次轮询最多处理的 backlog 条目数 */
   limit: number;
+  log?: PrRadarPollLogFn;
 }): Promise<{ processedOk: number; processedFail: number }> {
-  const { token, task, limit } = props;
+  const { token, task, limit, log } = props;
 
-  const fork = await ensureUpstreamForkMapped(token, task.owner, task.repo);
+  const fork = await ensureUpstreamForkMapped(token, task.owner, task.repo, log);
+
+  await logLine(log, `merge-upstream：${fork.forkRepo} ← upstream/${task.branch}`);
 
   try {
     await syncForkUpstreamBranch(token, fork.forkOwner, fork.forkRepo, task.branch);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
+    await logLine(log, `初始 merge-upstream 警告：${msg}`);
     console.warn(`[pr-radar-bot] 初始 merge-upstream：${msg}`);
   }
 
@@ -486,6 +561,7 @@ export async function runPendingMergedPrBotsForTask(props: {
 
   for (const row of backlog) {
     try {
+      await logLine(log, `排队处理 mergedRow=${row.id} PR #${row.githubPrNumber}`);
       await processMergedPrForkMirror({
         token,
         task,
@@ -493,6 +569,7 @@ export async function runPendingMergedPrBotsForTask(props: {
         mergedRowId: row.id,
         prNumber: row.githubPrNumber,
         storedMergeSha: row.mergeCommitSha,
+        log,
       });
       processedOk += 1;
     } catch (e) {
