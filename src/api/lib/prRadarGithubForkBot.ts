@@ -3,14 +3,11 @@ import crypto from "node:crypto";
 
 import type { PrRadarWatchTask } from "@prisma/client";
 
-import {
-  collectBlobFilesRecursive,
-  githubDeleteRepoBlob,
-  githubPutUtf8File,
-} from "@/api/lib/prRadarGithubContents.ts";
+import { collectBlobFilesRecursive } from "@/api/lib/prRadarGithubContents.ts";
 import { ghHeaders } from "@/api/lib/githubGhRest.ts";
 import { prisma } from "@/api/lib/prisma.ts";
 import type { PrRadarPollLogFn } from "@/api/lib/prRadarPollLog.ts";
+import { singleCommitUpsertRepoFiles } from "@/api/lib/prRadarGithubSingleCommit.ts";
 import {
   BOT_WORKFLOW_REPO_PATH,
   type PrRadarWatchBotOverlayDto,
@@ -410,7 +407,7 @@ async function pushBotArtifactsToBranch(args: {
 
   await logLine(
     log,
-    `Bot：删除 refs/heads/${branchShort} 上 .github/workflows/*（共先探测再逐项删）…`,
+    `Bot：探测 refs/heads/${branchShort} 上 .github/workflows 下条目…`,
   );
   const blobs = await collectBlobFilesRecursive(
     token,
@@ -419,54 +416,29 @@ async function pushBotArtifactsToBranch(args: {
     branchShort,
     ".github/workflows",
   );
-  blobs.sort((a, b) => b.path.length - a.path.length);
+  const deletePaths = blobs.map((b) => b.path);
 
-  let delIdx = 0;
-  const totalDel = blobs.length;
+  await logLine(
+    log,
+    `Bot：单提交（Git Data API）清空 workflows(${deletePaths.length}) + 写入「${BOT_WORKFLOW_REPO_PATH}」+覆盖 ${overlayRows.length}`,
+  );
+
   const shaHint = mergeSha.slice(0, 7);
-  for (const blob of blobs) {
-    delIdx += 1;
-    await githubDeleteRepoBlob(
-      token,
-      forkOwner,
-      forkRepo,
-      blob.path,
-      blob.sha,
-      branchShort,
-      `chore(bot): remove workflow file before PR #${prNumber} (${shaHint}) [${delIdx}/${totalDel}]`,
-    );
-  }
-  if (totalDel === 0) {
-    await logLine(log, `Bot：.github/workflows 下无现存文件`);
-  } else {
-    await logLine(log, `Bot：已删除 ${totalDel} 个 workflows 条目`);
-  }
-
-  await logLine(log, `Bot：写入「${BOT_WORKFLOW_REPO_PATH}」`);
-  await githubPutUtf8File({
+  const { newCommitSha } = await singleCommitUpsertRepoFiles({
     token,
     owner: forkOwner,
     repo: forkRepo,
-    path: BOT_WORKFLOW_REPO_PATH,
     branch: branchShort,
-    bodyUtf8: workflowYaml,
-    commitMessage: `chore(bot): set ${BOT_WORKFLOW_REPO_PATH} for PR #${prNumber}`,
+    commitMessage:
+      `chore(bot): replace .github/workflows + overlays for upstream PR #${prNumber}` +
+      ` (merge ${shaHint})`,
+    deletePathsRelative: deletePaths,
+    writeUtf8Relative: [
+      { path: BOT_WORKFLOW_REPO_PATH, bodyUtf8: workflowYaml },
+      ...overlayRows.map((r) => ({ path: r.path, bodyUtf8: r.content })),
+    ],
   });
-
-  let w = 0;
-  for (const row of overlayRows) {
-    w += 1;
-    await logLine(log, `Bot：覆盖「${row.path}」（${w}/${overlayRows.length}）`);
-    await githubPutUtf8File({
-      token,
-      owner: forkOwner,
-      repo: forkRepo,
-      path: row.path,
-      branch: branchShort,
-      bodyUtf8: row.content,
-      commitMessage: `chore(bot): sync overlay ${row.path} for PR #${prNumber}`,
-    });
-  }
+  await logLine(log, `Bot：单提交已完成 ${newCommitSha.slice(0, 7)}`);
 }
 
 async function persistMergeShaIfNeeded(mergedRowId: string, current: string | null, resolved: string) {
@@ -605,6 +577,12 @@ export async function runPendingMergedPrBotsForTask(props: {
       mergeCommitSha: true,
     },
   });
+
+  await logLine(
+    log,
+    `Fork/Bot 待队列：满足「已入库 merged PR 且 botPushedAt 仍为空」的条目 ${backlog.length} 条（本轮至多处理 ${limit} 条）；` +
+      `若 LIST 排头兵 merged_at 为空则不会新开合并记录`,
+  );
 
   for (const row of backlog) {
     try {

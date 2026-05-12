@@ -1,6 +1,7 @@
 import axios from "axios";
 import type { PrRadarWatchTask } from "@prisma/client";
 
+import { ghHeaders } from "@/api/lib/githubGhRest.ts";
 import { getInfra, InfraKey } from "@/api/lib/infra.ts";
 import { prisma } from "@/api/lib/prisma.ts";
 import type { PrRadarPollLogFn } from "@/api/lib/prRadarPollLog.ts";
@@ -8,6 +9,10 @@ import { runPendingMergedPrBotsForTask } from "@/api/lib/prRadarGithubForkBot.ts
 
 /** 单次轮询每个任务至多 1 条合并 PR 记录 → backlog 至多处理 1 条 */
 const BOT_BACKLOG_PER_POLL = 1;
+
+/** 在「closed + base」下列表里向前翻页的步长与上限（GitHub LIST 不能直接按 merged_at 排序）。 */
+const MERGED_SCAN_PER_PAGE = 100;
+const MERGED_SCAN_MAX_PAGES = 8;
 
 type GitHubPull = {
   number: number;
@@ -19,52 +24,61 @@ type GitHubPull = {
   merged_by?: { login?: string | null } | null;
 };
 
-function githubHeaders(token: string) {
-  return {
-    Authorization: `Bearer ${token}`,
-    Accept: "application/vnd.github+json",
-    "X-GitHub-Api-Version": "2022-11-28",
-  };
-}
-
 async function emitLine(log: PrRadarPollLogFn | undefined, line: string) {
   await Promise.resolve(log?.(line));
 }
 
 /**
- * 每次只请求「updated 排序下最新的一条 closed PR」（per_page=1）。
- * 「总量为 1」：每个监听任务至多保留一行 `PrRadarMergedPr`。
+ * 「最近一条合并进指定 base 的 PR」：GitHub LIST 仅支持按 updated/created 排序，故在 closed+base 下列表上
+ * 分页收集 `merged_at != null` 的项，再本地按 `merged_at` 取最新。
  */
-async function fetchLatestClosedPull(
+async function fetchLatestMergedPullIntoBase(
   owner: string,
   repo: string,
   branch: string,
   token: string,
-): Promise<GitHubPull | null> {
+): Promise<{ pr: GitHubPull | null; scanned: number }> {
   const url = `https://api.github.com/repos/${owner}/${repo}/pulls`;
-  const response = await axios.get<GitHubPull[]>(url, {
-    params: {
-      state: "closed",
-      base: branch,
-      sort: "updated",
-      direction: "desc",
-      per_page: 1,
-      page: 1,
-    },
-    headers: githubHeaders(token),
-    validateStatus: () => true,
-  });
-  if (response.status < 200 || response.status >= 300) {
-    const body =
-      typeof response.data === "string"
-        ? response.data
-        : JSON.stringify(response.data ?? {});
-    throw new Error(`GitHub API 请求失败（${response.status}）：${body.slice(0, 500)}`);
+  const merged: GitHubPull[] = [];
+  let scanned = 0;
+
+  for (let page = 1; page <= MERGED_SCAN_MAX_PAGES; page += 1) {
+    const response = await axios.get<GitHubPull[]>(url, {
+      params: {
+        state: "closed",
+        base: branch,
+        sort: "updated",
+        direction: "desc",
+        per_page: MERGED_SCAN_PER_PAGE,
+        page,
+      },
+      headers: ghHeaders(token),
+      validateStatus: () => true,
+    });
+    if (response.status < 200 || response.status >= 300) {
+      const body =
+        typeof response.data === "string"
+          ? response.data
+          : JSON.stringify(response.data ?? {});
+      throw new Error(`GitHub API 请求失败（${response.status}）：${body.slice(0, 500)}`);
+    }
+    const data = response.data;
+    if (!Array.isArray(data) || data.length === 0) break;
+    scanned += data.length;
+    for (const p of data) {
+      if (p.merged_at && p.base?.ref === branch) merged.push(p);
+    }
+    if (data.length < MERGED_SCAN_PER_PAGE) break;
   }
-  const data = response.data;
-  if (!Array.isArray(data) || data.length === 0) return null;
-  const pr = data[0];
-  return pr ?? null;
+
+  if (merged.length === 0) return { pr: null, scanned };
+
+  const best = merged.reduce((a, b) => {
+    const ta = new Date(a.merged_at!).getTime();
+    const tb = new Date(b.merged_at!).getTime();
+    return tb >= ta ? b : a;
+  });
+  return { pr: best, scanned };
 }
 
 /**
@@ -81,17 +95,26 @@ export async function pollWatchTaskWithLog(
     throw new Error('未配置 GITHUB_PRIVATE_TOKEN（请在 Infra /「GitHub Token」中保存 PAT）');
   }
 
-  await emitLine(log, "LIST pulls：per_page=1 state=closed");
-  const pr = await fetchLatestClosedPull(task.owner, task.repo, task.branch, token);
+  await emitLine(
+    log,
+    `LIST pulls：state=closed base=${task.branch}，` +
+      `分页至多 ${MERGED_SCAN_MAX_PAGES}×${MERGED_SCAN_PER_PAGE} 条，择优 merged_at 最新（已合并进 base）`,
+  );
+  const { pr, scanned } = await fetchLatestMergedPullIntoBase(task.owner, task.repo, task.branch, token);
 
   let newCount = 0;
 
   if (!pr) {
-    await emitLine(log, "LIST 返回 0 条 closed PR（该 base）");
+    await emitLine(
+      log,
+      scanned === 0
+        ? "LIST 在所扫范围内无 closed PR（该 base）"
+        : `LIST 在所扫 ${scanned} 条 closed PR 内未发现已合并（merged_at）进 base 的记录`,
+    );
   } else {
     await emitLine(
       log,
-      `排头兵 PR #${pr.number} merged_at=${pr.merged_at ?? "∅"} base=${pr.base.ref}`,
+      `排头兵（已合并 PR）#${pr.number} merged_at=${pr.merged_at} base=${pr.base.ref} merge_commit=${(pr.merge_commit_sha ?? "").slice(0, 7)}`,
     );
   }
 
@@ -142,9 +165,9 @@ export async function pollWatchTaskWithLog(
           NOT: { id: latest.id },
         },
       });
-      await emitLine(log, `LIST 排头兵非 merged：裁剪重复行，保留 PR #${latest.githubPrNumber}`);
+      await emitLine(log, `本次未解析到已合并排头兵：裁剪重复行，保留 PR #${latest.githubPrNumber}`);
     } else {
-      await emitLine(log, "LIST 排头兵非 merged：保留原有合并记录（若有）");
+      await emitLine(log, "本次未解析到已合并排头兵：保留原有合并记录（若有）");
     }
   }
 

@@ -463,10 +463,9 @@ const PrRadarPage = () => {
                 新建监听
               </Button>
               <span style={{ color: "#666", fontSize: 13 }}>
-                每条监听任务在库里<strong>最多只保留一条</strong>合并 PR；pulls 仍为 <code>
-                  per_page=1
-                </code>
-                ；Bot backlog 每轮也<strong>最多处理一条</strong>。
+                每条监听任务在库里<strong>最多只保留一条</strong>已合并 PR；抓取时在监听 base 上对{" "}
+                <code>closed</code> pulls 分页扫描（至多 8×100），取{" "}
+                <code>merged_at</code> 最新的已合并 PR；Bot backlog 每轮也<strong>最多处理一条</strong>。
                 <strong>定时调度与「立即拉取」均异步入队</strong>，侧栏可轮询作业日志。
               </span>
             </Space>
