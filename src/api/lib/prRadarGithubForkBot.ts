@@ -3,8 +3,19 @@ import crypto from "node:crypto";
 
 import type { PrRadarWatchTask } from "@prisma/client";
 
+import {
+  collectBlobFilesRecursive,
+  githubDeleteRepoBlob,
+  githubPutUtf8File,
+} from "@/api/lib/prRadarGithubContents.ts";
+import { ghHeaders } from "@/api/lib/githubGhRest.ts";
 import { prisma } from "@/api/lib/prisma.ts";
 import type { PrRadarPollLogFn } from "@/api/lib/prRadarPollLog.ts";
+import {
+  BOT_WORKFLOW_REPO_PATH,
+  type PrRadarWatchBotOverlayDto,
+  parseBotOverlayPayload,
+} from "@/shared/schemas/prRadarWatchBot.ts";
 
 const GH_API_BASE = "https://api.github.com";
 
@@ -16,14 +27,6 @@ const GH_FORK_READY_MAX_MS = 600_000;
 
 async function logLine(cb: PrRadarPollLogFn | undefined, msg: string) {
   await Promise.resolve(cb?.(msg));
-}
-
-export function ghHeaders(token: string) {
-  return {
-    Authorization: `Bearer ${token}`,
-    Accept: "application/vnd.github+json",
-    "X-GitHub-Api-Version": "2022-11-28",
-  };
 }
 
 function parseGithubAxiosMessage(status: number, data: unknown): string {
@@ -128,10 +131,6 @@ async function githubCreateFork(
       timeout: GH_FORK_CREATE_TIMEOUT_MS,
     },
   );
-  const bodyStr =
-    typeof res.data === "string" ? res.data : JSON.stringify(res.data ?? null, null, 2);
-  const maxLen = 16_384;
-  const truncated = bodyStr.length > maxLen ? `${bodyStr.slice(0, maxLen)}…(truncated ${bodyStr.length} chars)` : bodyStr;
   if (res.status < 200 || res.status >= 300) {
     throw new Error(`创建 fork「${upstreamOwner}/${upstreamRepo}」→「${forkRepoName}」失败 ${parseGithubAxiosMessage(res.status, res.data)}`);
   }
@@ -385,50 +384,89 @@ async function githubCreateBranchOrPointToSha(
   }
 }
 
-/** GitHub Contents API：新建与更新都应使用 PUT */
-async function githubPutTestMd(args: {
+/** 在 bot 分支上：清空 `.github/workflows` 下原有文件 → 写入 test.yaml → 写入任务定义的覆盖路径 */
+async function pushBotArtifactsToBranch(args: {
   token: string;
   forkOwner: string;
   forkRepo: string;
   branchShort: string;
   prNumber: number;
   mergeSha: string;
+  workflowYaml: string;
+  overlayRows: PrRadarWatchBotOverlayDto[];
+  log?: PrRadarPollLogFn;
 }): Promise<void> {
-  const { token, forkOwner, forkRepo, branchShort, prNumber, mergeSha } = args;
+  const {
+    token,
+    forkOwner,
+    forkRepo,
+    branchShort,
+    prNumber,
+    mergeSha,
+    workflowYaml,
+    overlayRows,
+    log,
+  } = args;
 
-  type ContentResp = {
-    sha?: string;
-    type?: string;
-  };
-
-  const getRes = await axios.get<ContentResp>(
-    `${GH_API_BASE}/repos/${forkOwner}/${forkRepo}/contents/test.md`,
-    {
-      headers: ghHeaders(token),
-      params: { ref: branchShort },
-      validateStatus: () => true,
-    },
+  await logLine(
+    log,
+    `Bot：删除 refs/heads/${branchShort} 上 .github/workflows/*（共先探测再逐项删）…`,
   );
+  const blobs = await collectBlobFilesRecursive(
+    token,
+    forkOwner,
+    forkRepo,
+    branchShort,
+    ".github/workflows",
+  );
+  blobs.sort((a, b) => b.path.length - a.path.length);
 
-  const bodyMarkdown =
-    `# test\n\n` + `- upstream PR #${prNumber}\n` + `- merge_commit \`${mergeSha}\`\n`;
+  let delIdx = 0;
+  const totalDel = blobs.length;
+  const shaHint = mergeSha.slice(0, 7);
+  for (const blob of blobs) {
+    delIdx += 1;
+    await githubDeleteRepoBlob(
+      token,
+      forkOwner,
+      forkRepo,
+      blob.path,
+      blob.sha,
+      branchShort,
+      `chore(bot): remove workflow file before PR #${prNumber} (${shaHint}) [${delIdx}/${totalDel}]`,
+    );
+  }
+  if (totalDel === 0) {
+    await logLine(log, `Bot：.github/workflows 下无现存文件`);
+  } else {
+    await logLine(log, `Bot：已删除 ${totalDel} 个 workflows 条目`);
+  }
 
-  const content = Buffer.from(bodyMarkdown, "utf8").toString("base64");
-  const payload: Record<string, string> = {
-    message: `chore(bot): add test.md for PR #${prNumber}`,
-    content,
+  await logLine(log, `Bot：写入「${BOT_WORKFLOW_REPO_PATH}」`);
+  await githubPutUtf8File({
+    token,
+    owner: forkOwner,
+    repo: forkRepo,
+    path: BOT_WORKFLOW_REPO_PATH,
     branch: branchShort,
-  };
+    bodyUtf8: workflowYaml,
+    commitMessage: `chore(bot): set ${BOT_WORKFLOW_REPO_PATH} for PR #${prNumber}`,
+  });
 
-  if (getRes.status === 200 && getRes.data?.sha) payload.sha = getRes.data.sha;
-
-  await axiosThrowGitHub(
-    `写入 test.md（分支「${branchShort}」）失败`,
-    axios.put(`${GH_API_BASE}/repos/${forkOwner}/${forkRepo}/contents/test.md`, payload, {
-      headers: ghHeaders(token),
-      validateStatus: () => true,
-    }),
-  );
+  let w = 0;
+  for (const row of overlayRows) {
+    w += 1;
+    await logLine(log, `Bot：覆盖「${row.path}」（${w}/${overlayRows.length}）`);
+    await githubPutUtf8File({
+      token,
+      owner: forkOwner,
+      repo: forkRepo,
+      path: row.path,
+      branch: branchShort,
+      bodyUtf8: row.content,
+      commitMessage: `chore(bot): sync overlay ${row.path} for PR #${prNumber}`,
+    });
+  }
 }
 
 async function persistMergeShaIfNeeded(mergedRowId: string, current: string | null, resolved: string) {
@@ -463,6 +501,18 @@ export async function processMergedPrForkMirror(args: {
 
   await logLine(log, `Bot：PR #${prNumber} merge_sha=${mergeSha.slice(0, 7)} …`);
 
+  const wf = typeof task.botWorkflowYaml === "string" ? task.botWorkflowYaml : "";
+  if (!wf.trim()) {
+    throw new Error("监听任务缺少 .github/workflows/test.yaml 正文，请编辑监听任务补齐后再推送");
+  }
+  let overlayRows: PrRadarWatchBotOverlayDto[];
+  try {
+    overlayRows = parseBotOverlayPayload(task.botOverlayFiles);
+  } catch (e) {
+    const hint = e instanceof Error ? e.message : String(e);
+    throw new Error(`监听任务的覆盖文件列表无效：${hint}`);
+  }
+
   const tryMergeUpstreamQuiet = async () => {
     try {
       await syncForkUpstreamBranch(token, fork.forkOwner, fork.forkRepo, task.branch);
@@ -490,14 +540,17 @@ export async function processMergedPrForkMirror(args: {
   await logLine(log, `Bot：建/移分支 refs/heads/${branchShort}`);
   await githubCreateBranchOrPointToSha(token, fork.forkOwner, fork.forkRepo, branchShort, mergeSha);
 
-  await logLine(log, `Bot：PUT Contents test.md@${branchShort}`);
-  await githubPutTestMd({
+  await logLine(log, `Bot：推送「${BOT_WORKFLOW_REPO_PATH}」与覆盖文件（${overlayRows.length}）`);
+  await pushBotArtifactsToBranch({
     token,
     forkOwner: fork.forkOwner,
     forkRepo: fork.forkRepo,
     branchShort,
     prNumber,
     mergeSha,
+    workflowYaml: wf,
+    overlayRows,
+    log,
   });
 
   const branchUrl = `https://github.com/${fork.forkOwner}/${fork.forkRepo}/tree/${branchShort}`;
@@ -514,7 +567,7 @@ export async function processMergedPrForkMirror(args: {
   await logLine(log, `Bot：PR #${prNumber} 完成 ${branchUrl}`);
 }
 
-/** 对已入库条目跑 bot：确保 fork→sync→建分支→写 test.md（失败写 botLastError，后续轮询会重试） */
+/** 对已入库条目跑 bot：fork→sync→建分支→清 workflows→写 test.yaml 与覆盖文件（失败写入 botLastError） */
 export async function runPendingMergedPrBotsForTask(props: {
   token: string;
   task: PrRadarWatchTask;

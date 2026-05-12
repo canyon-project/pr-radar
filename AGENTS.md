@@ -80,3 +80,6 @@ prisma/
 
 - 开发时：非 `/api` 请求走 Vite，`/api` 请求走 Hono
 - 生产构建：client 与 server 分别构建，server 用 `serveStatic` 托管静态资源
+
+## changelog
+- 每次对话变更都记录到 `changelog.md`，包含需求、实现摘要、跟进等，便于追溯「对话 → 代码」的演进。

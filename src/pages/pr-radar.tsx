@@ -1,8 +1,11 @@
+import { PlusOutlined } from "@ant-design/icons";
+import Editor from "@monaco-editor/react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Alert,
   Button,
   Card,
+  Divider,
   Drawer,
   Form,
   Input,
@@ -35,6 +38,49 @@ import {
   type PrRadarMergedPr,
   type PrRadarWatchTask,
 } from "@/services/prRadar.ts";
+import {
+  BOT_WORKFLOW_REPO_PATH,
+  DEFAULT_BOT_TEST_YAML,
+} from "@/shared/schemas/prRadarWatchBot.ts";
+
+function YamlEditorField(props: { value?: string; onChange?: (v: string) => void }) {
+  const { value, onChange } = props;
+  return (
+    <div className="overflow-hidden rounded-md border border-gray-300">
+      <Editor
+        height={280}
+        theme="vs"
+        defaultLanguage="yaml"
+        value={value ?? ""}
+        options={{
+          minimap: { enabled: false },
+          tabSize: 2,
+          scrollBeyondLastLine: false,
+        }}
+        onChange={(v) => onChange?.(v ?? "")}
+      />
+    </div>
+  );
+}
+
+function TextBlobEditorField(props: { value?: string; onChange?: (v: string) => void }) {
+  const { value, onChange } = props;
+  return (
+    <div className="overflow-hidden rounded-md border border-gray-300">
+      <Editor
+        height={160}
+        theme="vs"
+        defaultLanguage="plaintext"
+        value={value ?? ""}
+        options={{
+          minimap: { enabled: false },
+          scrollBeyondLastLine: false,
+        }}
+        onChange={(v) => onChange?.(v ?? "")}
+      />
+    </div>
+  );
+}
 
 const PrRadarPage = () => {
   const [tokenConfigured, setTokenConfigured] = useState<boolean | null>(null);
@@ -51,6 +97,8 @@ const PrRadarPage = () => {
     branch: string;
     intervalMinutes: number;
     enabled: boolean;
+    botWorkflowYaml: string;
+    botOverlayFiles: { path: string; content: string }[];
   }>();
 
   const [tokenModalOpen, setTokenModalOpen] = useState(false);
@@ -149,6 +197,8 @@ const PrRadarPage = () => {
       branch: "main",
       intervalMinutes: 15,
       enabled: true,
+      botWorkflowYaml: DEFAULT_BOT_TEST_YAML,
+      botOverlayFiles: [],
     });
     setModalOpen(true);
   };
@@ -161,6 +211,11 @@ const PrRadarPage = () => {
       branch: record.branch,
       intervalMinutes: record.intervalMinutes,
       enabled: record.enabled,
+      botWorkflowYaml:
+        typeof record.botWorkflowYaml === "string" && record.botWorkflowYaml.trim()
+          ? record.botWorkflowYaml
+          : DEFAULT_BOT_TEST_YAML,
+      botOverlayFiles: Array.isArray(record.botOverlayFiles) ? [...record.botOverlayFiles] : [],
     });
     setModalOpen(true);
   };
@@ -175,6 +230,8 @@ const PrRadarPage = () => {
             branch: values.branch,
             intervalMinutes: values.intervalMinutes,
             enabled: values.enabled,
+            botWorkflowYaml: values.botWorkflowYaml,
+            botOverlayFiles: values.botOverlayFiles ?? [],
           });
           message.success("已更新监听任务");
         } else {
@@ -183,6 +240,8 @@ const PrRadarPage = () => {
             branch: values.branch,
             intervalMinutes: values.intervalMinutes,
             enabled: values.enabled,
+            botWorkflowYaml: values.botWorkflowYaml,
+            botOverlayFiles: values.botOverlayFiles ?? [],
           });
           message.success("已创建监听任务");
         }
@@ -446,6 +505,8 @@ const PrRadarPage = () => {
       <Modal
         title={editing ? "编辑监听任务" : "新建监听任务"}
         open={modalOpen}
+        width={920}
+        styles={{ body: { maxHeight: "78vh", overflowY: "auto", paddingTop: 12 } }}
         onOk={() => void submitTask()}
         onCancel={() => setModalOpen(false)}
         destroyOnHidden
@@ -476,6 +537,59 @@ const PrRadarPage = () => {
           <Form.Item label="启用" name="enabled" valuePropName="checked">
             <Switch />
           </Form.Item>
+
+          <Divider titlePlacement="start">Bot 推送内容</Divider>
+          <Typography.Paragraph type="secondary" style={{ marginTop: 0, marginBottom: 12 }}>
+            Bot 在 fork 上写入 canyon-bot 分支时，会先删除该分支下 <code>.github/workflows/</code> 目录中的
+            全部条目，再写入<strong>固定路径 </strong>
+            <code>{BOT_WORKFLOW_REPO_PATH}</code>，随后按下列「覆盖文件」逐项 PUT（有则覆盖，无则创建）。
+          </Typography.Paragraph>
+
+          <Form.Item
+            label={
+              <span className="flex flex-wrap items-center gap-1">
+                <span>强制 CI 工作流（Monaco）</span>
+                <code className="rounded bg-gray-100 px-1 py-0.5 text-xs">{BOT_WORKFLOW_REPO_PATH}</code>
+              </span>
+            }
+            name="botWorkflowYaml"
+            rules={[{ required: true, message: "必填：test.yaml 正文" }]}
+          >
+            <YamlEditorField />
+          </Form.Item>
+
+          <Typography.Paragraph type="secondary" style={{ marginBottom: 8 }}>
+            以下为仓库根相对路径；禁止使用 <code>.github/workflows/</code> 下的路径。
+          </Typography.Paragraph>
+
+          <Form.List name="botOverlayFiles">
+            {(fields, { add, remove }) => (
+              <Space direction="vertical" size={12} style={{ width: "100%" }}>
+                <Button type="dashed" block icon={<PlusOutlined />} onClick={() => add({ path: "", content: "" })}>
+                  添加覆盖文件
+                </Button>
+                {fields.map((field, idx) => (
+                  <Card
+                    key={field.key}
+                    size="small"
+                    title={`覆盖文件 #${idx + 1}`}
+                    extra={
+                      <Button type="link" danger size="small" onClick={() => remove(field.name)}>
+                        移除
+                      </Button>
+                    }
+                  >
+                    <Form.Item label="相对路径" name={[field.name, "path"]}>
+                      <Input placeholder="scripts/a.ts" />
+                    </Form.Item>
+                    <Form.Item label="正文（覆盖写入）" name={[field.name, "content"]}>
+                      <TextBlobEditorField />
+                    </Form.Item>
+                  </Card>
+                ))}
+              </Space>
+            )}
+          </Form.List>
         </Form>
       </Modal>
 

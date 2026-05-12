@@ -52,6 +52,10 @@ model PrRadarWatchTask {
   branch          String
   intervalMinutes Int
   enabled         Boolean      @default(true)
+  /// Fork Bot 推到 PR 分之上的 `.github/workflows/test.yaml`（任务级固定路径，仅存全文）
+  botWorkflowYaml String       @default("") @db.Text
+  /// 每次推送顺带覆盖的路径 + 正文，例如 [{"path":"a.ts","content":"..."}]
+  botOverlayFiles Json         @default("[]")
   lastPolledAt    DateTime?
   createdAt       DateTime     @default(now())
   updatedAt       DateTime     @updatedAt

@@ -1,9 +1,19 @@
 import { createRoute, z } from "@hono/zod-openapi";
 import { OpenAPIHono } from "@hono/zod-openapi";
+import type { PrRadarWatchTask } from "@prisma/client";
 
 import { parseGithubRepo } from "@/api/lib/githubRepo.ts";
 import { tryEnqueuePollJob } from "@/api/lib/prRadarAsyncWorker.ts";
 import { prisma } from "@/api/lib/prisma.ts";
+import {
+  parseBotOverlayPayload,
+  parseMandatoryBotWorkflowYaml,
+} from "@/shared/schemas/prRadarWatchBot.ts";
+
+const botOverlayDto = z.object({
+  path: z.string(),
+  content: z.string(),
+});
 
 const taskDto = z.object({
   id: z.string().uuid(),
@@ -13,6 +23,8 @@ const taskDto = z.object({
   branch: z.string(),
   intervalMinutes: z.number().int(),
   enabled: z.boolean(),
+  botWorkflowYaml: z.string(),
+  botOverlayFiles: z.array(botOverlayDto),
   lastPolledAt: z.string().nullable(),
   createdAt: z.string(),
   updatedAt: z.string(),
@@ -27,6 +39,8 @@ const createBody = z.object({
   branch: z.string().min(1),
   intervalMinutes: z.coerce.number().int().min(1).max(24 * 60),
   enabled: z.boolean().optional(),
+  botWorkflowYaml: z.string(),
+  botOverlayFiles: z.array(botOverlayDto).optional().default([]),
 });
 
 const patchBody = z
@@ -35,34 +49,34 @@ const patchBody = z
     branch: z.string().min(1).optional(),
     intervalMinutes: z.coerce.number().int().min(1).max(24 * 60).optional(),
     enabled: z.boolean().optional(),
+    botWorkflowYaml: z.string().optional(),
+    botOverlayFiles: z.array(botOverlayDto).optional(),
   })
   .refine(
     (v) =>
       v.repositoryUrl !== undefined ||
       v.branch !== undefined ||
       v.intervalMinutes !== undefined ||
-      v.enabled !== undefined,
+      v.enabled !== undefined ||
+      v.botWorkflowYaml !== undefined ||
+      v.botOverlayFiles !== undefined,
     { message: "至少需要修改一个字段" },
   );
 
 const pollEnqueueDto = z.object({
   jobId: z.string().uuid(),
-  /** true 表示该任务已在跑 PENDING/RUNNING，未新建队列项 */
   reused: z.boolean(),
 });
 
-function toDto(row: {
-  id: string;
-  repositoryUrl: string;
-  owner: string;
-  repo: string;
-  branch: string;
-  intervalMinutes: number;
-  enabled: boolean;
-  lastPolledAt: Date | null;
-  createdAt: Date;
-  updatedAt: Date;
-}) {
+function safeBotOverlays(raw: unknown): z.infer<typeof botOverlayDto>[] {
+  try {
+    return parseBotOverlayPayload(raw);
+  } catch {
+    return [];
+  }
+}
+
+function toDto(row: PrRadarWatchTask) {
   return {
     id: row.id,
     repositoryUrl: row.repositoryUrl,
@@ -71,6 +85,8 @@ function toDto(row: {
     branch: row.branch,
     intervalMinutes: row.intervalMinutes,
     enabled: row.enabled,
+    botWorkflowYaml: row.botWorkflowYaml,
+    botOverlayFiles: safeBotOverlays(row.botOverlayFiles),
     lastPolledAt: row.lastPolledAt ? row.lastPolledAt.toISOString() : null,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
@@ -112,7 +128,7 @@ const getRoute = createRoute({
 const createRouteDef = createRoute({
   method: "post",
   path: "/",
-  summary: "创建监听任务",
+  summary: "创建监听任务（须配置 .github/workflows/test.yaml 内容与可选覆盖路径）",
   tags: ["PR Radar · Watch"],
   request: {
     body: { content: { "application/json": { schema: createBody } } },
@@ -190,6 +206,20 @@ watchApi.openapi(getRoute, async (c) => {
 
 watchApi.openapi(createRouteDef, async (c) => {
   const body = c.req.valid("json");
+  let overlaysSanitized;
+  try {
+    overlaysSanitized = parseBotOverlayPayload(body.botOverlayFiles ?? []);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "botOverlayFiles 无效";
+    return errJson(c, msg, 400);
+  }
+  let wf: string;
+  try {
+    wf = parseMandatoryBotWorkflowYaml(body.botWorkflowYaml);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "workflow 正文无效";
+    return errJson(c, msg, 400);
+  }
   let parsed;
   try {
     parsed = parseGithubRepo(body.repositoryUrl);
@@ -197,6 +227,7 @@ watchApi.openapi(createRouteDef, async (c) => {
     const msg = e instanceof Error ? e.message : "仓库地址无效";
     return errJson(c, msg, 400);
   }
+
   const row = await prisma.prRadarWatchTask.create({
     data: {
       repositoryUrl: parsed.repositoryUrl,
@@ -205,6 +236,8 @@ watchApi.openapi(createRouteDef, async (c) => {
       branch: body.branch.trim(),
       intervalMinutes: body.intervalMinutes,
       enabled: body.enabled ?? true,
+      botWorkflowYaml: wf,
+      botOverlayFiles: overlaysSanitized,
     },
   });
   return c.json(toDto(row), 201);
@@ -231,6 +264,32 @@ watchApi.openapi(patchRouteDef, async (c) => {
       return errJson(c, msg, 400);
     }
   }
+
+  let wfMaybe: string | undefined;
+  if (body.botWorkflowYaml !== undefined) {
+    try {
+      wfMaybe = parseMandatoryBotWorkflowYaml(body.botWorkflowYaml);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "workflow 正文无效";
+      return errJson(c, msg, 400);
+    }
+  }
+
+  let overlaysMaybe:
+    | {
+        path: string;
+        content: string;
+      }[]
+    | undefined;
+  if (body.botOverlayFiles !== undefined) {
+    try {
+      overlaysMaybe = parseBotOverlayPayload(body.botOverlayFiles);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "botOverlayFiles 无效";
+      return errJson(c, msg, 400);
+    }
+  }
+
   const row = await prisma.prRadarWatchTask.update({
     where: { id },
     data: {
@@ -240,6 +299,8 @@ watchApi.openapi(patchRouteDef, async (c) => {
       branch: body.branch !== undefined ? body.branch.trim() : undefined,
       intervalMinutes: body.intervalMinutes,
       enabled: body.enabled,
+      ...(wfMaybe !== undefined ? { botWorkflowYaml: wfMaybe } : {}),
+      ...(overlaysMaybe !== undefined ? { botOverlayFiles: overlaysMaybe } : {}),
     },
   });
   return c.json(toDto(row));

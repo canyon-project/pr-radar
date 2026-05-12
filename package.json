@@ -24,17 +24,20 @@
     "@hono/swagger-ui": "^0.6.1",
     "@hono/vite-dev-server": "^0.25.1",
     "@hono/zod-openapi": "^1.2.2",
+    "@monaco-editor/react": "^4.7.0",
     "@prisma/client": "6",
     "@tailwindcss/vite": "^4.2.1",
     "antd": "^6.3.6",
     "axios": "^1.16.0",
     "hono": "^4.12.7",
     "hono-history-api-fallback": "latest",
+    "monaco-editor": "0.55.1",
     "prisma": "6",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
     "tailwindcss": "^4.2.1",
-    "vite-plugin-pages": "^0.33.3"
+    "vite-plugin-pages": "^0.33.3",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@hono/vite-build": "^1.10.0",

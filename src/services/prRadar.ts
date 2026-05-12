@@ -12,6 +12,8 @@ export type PrRadarWatchTask = {
   branch: string;
   intervalMinutes: number;
   enabled: boolean;
+  botWorkflowYaml: string;
+  botOverlayFiles: { path: string; content: string }[];
   lastPolledAt: string | null;
   createdAt: string;
   updatedAt: string;
@@ -22,6 +24,8 @@ export type CreatePrRadarWatchTaskInput = {
   branch: string;
   intervalMinutes: number;
   enabled?: boolean;
+  botWorkflowYaml: string;
+  botOverlayFiles?: { path: string; content: string }[];
 };
 
 export type UpdatePrRadarWatchTaskInput = {
@@ -29,6 +33,8 @@ export type UpdatePrRadarWatchTaskInput = {
   branch?: string;
   intervalMinutes?: number;
   enabled?: boolean;
+  botWorkflowYaml?: string;
+  botOverlayFiles?: { path: string; content: string }[];
 };
 
 export type PrRadarMergedPr = {
