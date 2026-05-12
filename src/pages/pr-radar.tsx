@@ -25,6 +25,7 @@ import type { ColumnsType } from "antd/es/table";
 import BasicLayout from "@/layouts/BasicLayout.tsx";
 import {
   createPrRadarWatchTask,
+  deletePrRadarMergedPr,
   deletePrRadarWatchTask,
   getGithubTokenStatus,
   getPrRadarJob,
@@ -141,6 +142,16 @@ const PrRadarPage = () => {
       setLoadingMerged(false);
     }
   }, [filterTaskId]);
+
+  const removeMergedPr = useCallback(async (id: string) => {
+    try {
+      await deletePrRadarMergedPr(id);
+      message.success("已删除记录并已尝试删除 fork 上 bot 分支");
+      await fetchMerged();
+    } catch (e) {
+      message.error(prRadarApiErrorMessage(e, "删除失败"));
+    }
+  }, [fetchMerged]);
 
   useEffect(() => {
     void fetchTokenStatus();
@@ -418,6 +429,28 @@ const PrRadarPage = () => {
       dataIndex: "mergedByLogin",
       width: 120,
       render: (v: string | null) => v ?? <span style={{ color: "#999" }}>-</span>,
+    },
+    {
+      title: "操作",
+      key: "mergedActions",
+      width: 92,
+      render: (_, r) => {
+        const branchHint = r.botBranchName ?? `canyon-bot/pr-${r.githubPrNumber}`;
+        return (
+          <Popconfirm
+            title="删除本条入库记录，并删除 fork 上对应的 bot 分支？"
+            description={`远端 refs/heads/${branchHint}（无 fork 映射则只删库；404 视为分支已不存在）`}
+            okText="删除"
+            cancelText="取消"
+            okButtonProps={{ danger: true }}
+            onConfirm={() => void removeMergedPr(r.id)}
+          >
+            <Button type="link" danger size="small">
+              删除
+            </Button>
+          </Popconfirm>
+        );
+      },
     },
   ];
 

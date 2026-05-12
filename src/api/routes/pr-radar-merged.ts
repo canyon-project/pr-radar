@@ -1,6 +1,12 @@
 import { createRoute, z } from "@hono/zod-openapi";
 import { OpenAPIHono } from "@hono/zod-openapi";
 
+import { InfraKey, getInfra } from "@/api/lib/infra.ts";
+import {
+  botBranchNameForPr,
+  fetchAuthenticatedLogin,
+} from "@/api/lib/prRadarGithubForkBot.ts";
+import { githubDeleteBranchRefQuiet } from "@/api/lib/prRadarGithubSingleCommit.ts";
 import { prisma } from "@/api/lib/prisma.ts";
 
 const dto = z.object({
@@ -78,6 +84,21 @@ const listRoute = createRoute({
   },
 });
 
+const deleteRouteDef = createRoute({
+  method: "delete",
+  path: "/{id}",
+  summary: "删除已入库合并 PR，并删除 fork 上 canyon-bot 对应分支（有映射且无 Token 时失败）",
+  tags: ["PR Radar · Merged PR"],
+  request: {
+    params: z.object({ id: z.string().uuid() }),
+  },
+  responses: {
+    204: { description: "已删除" },
+    404: { description: "不存在" },
+    400: { description: "未配置 Token 或远端删分支失败" },
+  },
+});
+
 const mergedApi = new OpenAPIHono();
 
 mergedApi.openapi(listRoute, async (c) => {
@@ -88,6 +109,49 @@ mergedApi.openapi(listRoute, async (c) => {
     include: { task: { select: { repositoryUrl: true, branch: true } } },
   });
   return c.json(rows.map((r) => toDto({ ...r, task: r.task })));
+});
+
+mergedApi.openapi(deleteRouteDef, async (c) => {
+  const { id } = c.req.valid("param");
+  const merged = await prisma.prRadarMergedPr.findUnique({
+    where: { id },
+    include: { task: { select: { owner: true, repo: true } } },
+  });
+  if (!merged) {
+    return c.json({ message: "未找到合并 PR 记录" }, 404);
+  }
+
+  const token = getInfra(InfraKey.GITHUB_PRIVATE_TOKEN);
+  if (!token || token.length === 0) {
+    return c.json({ message: "未配置 GITHUB_PRIVATE_TOKEN，无法删除 fork 分支" }, 400);
+  }
+
+  const branchShort =
+    typeof merged.botBranchName === "string" && merged.botBranchName.trim().length > 0
+      ? merged.botBranchName.trim()
+      : botBranchNameForPr(merged.githubPrNumber);
+
+  try {
+    const login = await fetchAuthenticatedLogin(token);
+    const fork = await prisma.prRadarUpstreamFork.findUnique({
+      where: {
+        upstreamOwner_upstreamRepo_githubLogin: {
+          upstreamOwner: merged.task.owner,
+          upstreamRepo: merged.task.repo,
+          githubLogin: login,
+        },
+      },
+    });
+    if (fork) {
+      await githubDeleteBranchRefQuiet(token, login, fork.forkRepoName, branchShort);
+    }
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return c.json({ message: msg }, 400);
+  }
+
+  await prisma.prRadarMergedPr.delete({ where: { id } });
+  return c.body(null, 204);
 });
 
 export default mergedApi;

@@ -154,3 +154,23 @@ export async function singleCommitUpsertRepoFiles(opts: {
 
   return { newCommitSha };
 }
+
+/**
+ * 删除 fork 上的分支；远端已不存在（404）时视为成功，便于幂等清理。
+ */
+export async function githubDeleteBranchRefQuiet(
+  token: string,
+  owner: string,
+  repo: string,
+  branchShort: string,
+): Promise<void> {
+  const url = `${GH_API_BASE}/repos/${owner}/${repo}/git/refs/heads/${encodeURIComponent(branchShort)}`;
+  const res = await axios.delete(url, {
+    headers: ghHeaders(token),
+    validateStatus: () => true,
+  });
+  if (res.status === 204 || res.status === 404) return;
+  throw new Error(
+    `Git 删除远端分支「${branchShort}」失败：${axiosErrSnippet(res.status, res.data)}`,
+  );
+}

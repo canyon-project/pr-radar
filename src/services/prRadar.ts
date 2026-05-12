@@ -141,6 +141,10 @@ export async function pollPrRadarWatchTaskNow(taskId: string): Promise<PollEnque
   return enqueuePrRadarWatchTaskPoll(taskId);
 }
 
+export async function deletePrRadarMergedPr(id: string): Promise<void> {
+  await api.delete(`/pr-radar/merged-prs/${id}`);
+}
+
 export async function listPrRadarMergedPrs(taskId?: string): Promise<PrRadarMergedPr[]> {
   const { data } = await api.get<PrRadarMergedPr[]>("/pr-radar/merged-prs", {
     params: taskId ? { taskId } : {},
