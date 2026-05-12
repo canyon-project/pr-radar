@@ -132,16 +132,10 @@ async function githubCreateFork(
     typeof res.data === "string" ? res.data : JSON.stringify(res.data ?? null, null, 2);
   const maxLen = 16_384;
   const truncated = bodyStr.length > maxLen ? `${bodyStr.slice(0, maxLen)}…(truncated ${bodyStr.length} chars)` : bodyStr;
-  console.log(`[pr-radar] githubCreateFork HTTP ${res.status} ${upstreamOwner}/${upstreamRepo} 请求名=${forkRepoName}\n${truncated}`);
   if (res.status < 200 || res.status >= 300) {
     throw new Error(`创建 fork「${upstreamOwner}/${upstreamRepo}」→「${forkRepoName}」失败 ${parseGithubAxiosMessage(res.status, res.data)}`);
   }
   const actualSlug = actualForkRepoSlugFromCreateResponse(forkRepoName, res.data);
-  if (actualSlug !== forkRepoName) {
-    console.log(
-      `[pr-radar] githubCreateFork GitHub 实际仓库名「${actualSlug}」与请求名「${forkRepoName}」不同（常见：已存在上游 fork 时返回 202 + 已有仓库）`,
-    );
-  }
   return actualSlug;
 }
 
